@@ -34,6 +34,22 @@ const cache = new Map<string, ModelSpec>();
 let lastFetch = 0;
 const CACHE_TTL = 1000 * 60 * 60; // 1 hour
 
+// Fallback pricing for new models not yet in models.dev
+// Costs are per 1M tokens in USD
+const FALLBACK_PRICING: Record<string, ModelSpec> = {
+  "glm-5.1": {
+    name: "GLM-5.1",
+    tool_call: true,
+    reasoning: true,
+    attachment: false,
+    temperature: true,
+    interleaved: { field: "reasoning_content" },
+    cost: { input: 1.50, output: 4.80, cache_read: 0.30, cache_write: 0 },
+    limit: { context: 200000, output: 131072 },
+    modalities: { input: ["text"], output: ["text"] },
+  },
+};
+
 function parseToml(raw: string): Record<string, any> {
   const result: Record<string, any> = {};
   let currentSection: string | null = null;
@@ -154,7 +170,7 @@ export async function ensurePricing(): Promise<void> {
 }
 
 export function getModelSpec(modelId: string): ModelSpec | null {
-  return cache.get(modelId) || null;
+  return cache.get(modelId) || FALLBACK_PRICING[modelId] || null;
 }
 
 export function listModels(): Map<string, ModelSpec> {
@@ -170,7 +186,7 @@ export function calculateCostCents(
   cacheReadTokens = 0,
   cacheWriteTokens = 0
 ): number {
-  const spec = cache.get(modelId);
+  const spec = cache.get(modelId) || FALLBACK_PRICING[modelId];
   if (!spec) {
     const inputCost = (inputTokens / 1_000_000) * 10;
     const outputCost = (outputTokens / 1_000_000) * 30;

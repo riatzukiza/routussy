@@ -15,6 +15,8 @@ export interface ProxyConfig {
   // Path prefix the upstream expects before /chat/completions etc.
   // Defaults to "/v1". Set to "" if the base URL already includes the version.
   upstreamPrefix?: string;
+  // Cost per image in cents (default: 1.5 cents = $0.015)
+  imageCostCents?: number;
 }
 
 function extractBearerToken(req: Request): string | null {
@@ -84,6 +86,104 @@ function recordUsage(
   config.quota
     .record(keyId, userId, cost, usage.model, usage.inputTokens, usage.outputTokens, endpoint)
     .catch((err) => console.error("Failed to record usage:", err));
+}
+
+// Image generation cost: $0.015 per image = 1.5 cents
+const DEFAULT_IMAGE_COST_CENTS = 1.5;
+
+interface ImageGenerationResponse {
+  data?: Array<{ url?: string; b64_json?: string }>;
+  error?: { message: string; type: string; code: number };
+}
+
+async function handleImageGeneration(
+  req: Request,
+  config: ProxyConfig
+): Promise<Response> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    return errorResponse(401, "Missing API key");
+  }
+
+  const resolved = await resolveKey(token);
+  if (!resolved) {
+    return errorResponse(401, "Invalid API key");
+  }
+  if (!resolved.active) {
+    return errorResponse(403, "API key has been revoked");
+  }
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "Invalid JSON body");
+  }
+
+  const requestedModel: string = body?.model ?? "glm-image";
+  const imageCount = Math.max(1, Math.min(body?.n ?? 1, 10));
+  const costPerImage = config.imageCostCents ?? DEFAULT_IMAGE_COST_CENTS;
+  const estimatedCost = costPerImage * imageCount;
+
+  const check = await config.quota.check(resolved.id, estimatedCost);
+  if (!check.allowed) {
+    return errorResponse(
+      429,
+      `Quota exceeded: ${check.reason}. Remaining: $${(check.remainingCents / 100).toFixed(2)}`
+    );
+  }
+
+  const prefix = config.upstreamPrefix ?? "/v1";
+  const upstreamPath = `${prefix}/images/generations`;
+
+  const upstreamResp = await fetch(`${config.upstreamUrl}${upstreamPath}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.upstreamApiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  let raw: string;
+  try {
+    raw = await upstreamResp.text();
+  } catch {
+    return errorResponse(502, "Upstream returned unreadable response");
+  }
+
+  if (upstreamResp.ok) {
+    // Parse response to count actual images generated
+    let actualImageCount = imageCount;
+    try {
+      const parsed: ImageGenerationResponse = JSON.parse(raw);
+      if (parsed.data && Array.isArray(parsed.data)) {
+        actualImageCount = parsed.data.length;
+      }
+    } catch {
+      // Keep estimated count
+    }
+
+    const actualCost = costPerImage * actualImageCount;
+    try {
+      await config.quota.record(
+        resolved.id,
+        resolved.userId,
+        actualCost,
+        requestedModel,
+        0,
+        0,
+        "images"
+      );
+    } catch (err) {
+      console.error("Failed to record image generation usage:", err);
+    }
+  }
+
+  return new Response(raw, {
+    status: upstreamResp.status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 async function handleProxyRequest(
@@ -256,6 +356,9 @@ export function createProxyRoutes(config: ProxyConfig) {
           headers: { "Content-Type": "application/json" },
         });
       },
+    },
+    "/v1/images/generations": {
+      POST: (req: Request) => handleImageGeneration(req, config),
     },
   };
 }

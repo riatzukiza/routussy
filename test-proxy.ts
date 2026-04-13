@@ -167,6 +167,44 @@ async function main() {
   console.log(`  Error: ${badBody.error?.message}`);
   console.log("---");
 
+  // Test 5: Image generation
+  console.log("Test 5: POST /v1/images/generations");
+  const imageResp = await fetch(`http://localhost:${PORT}/v1/images/generations`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key.rawKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "glm-image",
+      prompt: "A simple red circle on white background, minimal",
+      size: "1024x1024",
+      n: 1,
+    }),
+  });
+  const imageBody = await imageResp.json() as any;
+  console.log(`  Status: ${imageResp.status}`);
+  if (imageResp.ok && imageBody.data) {
+    console.log(`  Images generated: ${imageBody.data.length}`);
+    console.log(`  Image URL: ${imageBody.data[0]?.url?.slice(0, 60)}...`);
+  } else {
+    console.log(`  Error: ${JSON.stringify(imageBody.error || imageBody)}`);
+  }
+  console.log("---");
+
+  // Check quota after image generation
+  await Bun.sleep(500);
+  const usageLog3 = await db.selectFrom("usage_log").selectAll().execute();
+  console.log(`  Usage log entries after image: ${usageLog3.length}`);
+  const imageUsage = usageLog3.find(e => e.endpoint === "images");
+  if (imageUsage) {
+    console.log(`  Image cost recorded: ${imageUsage.cost_cents}c`);
+  }
+
+  const userRow3 = await db.selectFrom("users").selectAll().where("discord_id", "=", "test-user").executeTakeFirst();
+  console.log(`  User spent: ${userRow3?.spent_cents}c / ${userRow3?.budget_cents}c`);
+  console.log("---");
+
   console.log("All tests complete!");
   process.exit(0);
 }
